@@ -1,0 +1,3 @@
+FROM apache/airflow:2.7.1-python3.10
+USER airflow
+RUN pip install --user acryl-datahub==0.12.0.3 sqlalchemy pandas psycopg2-binary requests 

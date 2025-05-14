@@ -1,0 +1,291 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:13
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: etl_pipeline
+      POSTGRES_MULTIPLE_DATABASES: airflow,datahub
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-multiple-databases.sh:/docker-entrypoint-initdb.d/init-multiple-databases.sh
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    networks:
+      - etl_net
+
+  spark:
+    image: bitnami/spark:latest
+    container_name: spark
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "7077:7077"
+      - "8080:8080"
+    networks:
+      - etl_net
+
+  spark-worker:
+    image: bitnami/spark:latest
+    container_name: spark-worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark:7077
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_WORKER_CORES=1
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    depends_on:
+      - spark
+    networks:
+      - etl_net
+
+  datahub-mysql:
+    image: mysql:5.7
+    container_name: datahub_mysql
+    environment:
+      - MYSQL_DATABASE=datahub
+      - MYSQL_USER=datahub
+      - MYSQL_PASSWORD=datahub
+      - MYSQL_ROOT_PASSWORD=datahub
+    ports:
+      - "3307:3306"
+    networks:
+      - etl_net
+
+  datahub-kafka:
+    image: confluentinc/cp-kafka:7.2.0
+    container_name: datahub_kafka
+    environment:
+      - KAFKA_ZOOKEEPER_CONNECT=datahub-zookeeper:2181
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://datahub-kafka:9092,PLAINTEXT_HOST://localhost:29092
+      - KAFKA_BROKER_ID=1
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+    depends_on:
+      - datahub-zookeeper
+    ports:
+      - "29092:29092"
+    networks:
+      - etl_net
+
+  datahub-zookeeper:
+    image: confluentinc/cp-zookeeper:7.2.0
+    container_name: datahub_zookeeper
+    environment:
+      - ZOOKEEPER_CLIENT_PORT=2181
+    ports:
+      - "2181:2181"
+    networks:
+      - etl_net
+
+  datahub-schema-registry:
+    image: confluentinc/cp-schema-registry:7.2.0
+    container_name: datahub_schema_registry
+    environment:
+      - SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS=datahub-kafka:9092
+      - SCHEMA_REGISTRY_HOST_NAME=datahub-schema-registry
+      - SCHEMA_REGISTRY_LISTENERS=http://0.0.0.0:8081
+    depends_on:
+      - datahub-kafka
+    ports:
+      - "8085:8081"
+    networks:
+      - etl_net
+
+  datahub-gms:
+    image: acryldata/datahub-gms:head
+    container_name: datahub_gms
+    environment:
+      - DATAHUB_GRAPH_SERVICE_IMPL=neo4j
+      - DATAHUB_NEO4J_HOST=datahub-neo4j
+      - DATAHUB_NEO4J_URI=bolt://datahub-neo4j:7687
+      - DATAHUB_NEO4J_USERNAME=neo4j
+      - DATAHUB_NEO4J_PASSWORD=datahub
+      - DATAHUB_ANALYTICS_ENABLED=false
+      - ELASTICSEARCH_URL=http://datahub-elasticsearch:9200
+      - DATAHUB_SYSTEM_CLIENT_ID=__datahub_system
+      - DATAHUB_SYSTEM_CLIENT_SECRET=JohnSnowKnowsNothing
+      - KAFKA_BOOTSTRAP_SERVER=datahub-kafka:9092
+      - SCHEMA_REGISTRY_URL=http://datahub-schema-registry:8081
+      - MYSQL_HOST=datahub-mysql:3306
+      - MYSQL_USERNAME=datahub
+      - MYSQL_PASSWORD=datahub
+      - DATAHUB_SERVER_TYPE=gms
+      - DATAHUB_AUTH_ENABLED=true
+      - DATAHUB_ROOT_USERNAME=admin
+      - DATAHUB_ROOT_PASSWORD=admin
+      - DATAHUB_STANDALONE_USAGE_EVENT_SIZE=50
+    ports:
+      - "8082:8080"
+    depends_on:
+      - datahub-neo4j
+      - datahub-elasticsearch
+      - datahub-kafka
+      - datahub-schema-registry
+      - datahub-mysql
+    networks:
+      - etl_net
+
+  datahub-frontend:
+    image: acryldata/datahub-frontend-react:head
+    container_name: datahub_frontend
+    environment:
+      - DATAHUB_GMS_HOST=datahub-gms
+      - DATAHUB_GMS_PORT=8080
+      - DATAHUB_SECRET=YouKnowNothing
+      - DATAHUB_APP_VERSION=1.0
+      - DATAHUB_PLAY_MEM_BUFFER_SIZE=10MB
+      - KAFKA_BOOTSTRAP_SERVER=datahub-kafka:9092
+      - ELASTICSEARCH_URL=http://datahub-elasticsearch:9200
+      - SCHEMA_REGISTRY_URL=http://datahub-schema-registry:8081
+      - DATAHUB_AUTH_ENABLED=true
+      - DATAHUB_ROOT_USERNAME=admin
+      - DATAHUB_ROOT_PASSWORD=admin
+    ports:
+      - "9002:9002"
+    depends_on:
+      - datahub-gms
+      - datahub-kafka
+      - datahub-elasticsearch
+      - datahub-schema-registry
+    networks:
+      - etl_net
+
+  datahub-neo4j:
+    image: neo4j:4.4
+    container_name: datahub_neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/datahub
+      - NEO4J_dbms_memory_heap_initial__size=1G
+      - NEO4J_dbms_memory_heap_max__size=1G
+      - NEO4J_dbms_memory_pagecache_size=1G
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    networks:
+      - etl_net
+
+  datahub-elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.10
+    container_name: datahub_elasticsearch
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+    networks:
+      - etl_net
+
+  datahub-ingestion:
+    image: acryldata/datahub-ingestion:head
+    container_name: datahub_ingestion
+    volumes:
+      - ./metadata:/metadata
+    environment:
+      - DATAHUB_GMS_URL=http://datahub-gms:8080
+    entrypoint: "/bin/bash"
+    command: "-c 'while true; do sleep 30; done'"  # Keep container running
+    networks:
+      - etl_net
+
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow-scheduler
+    command: scheduler
+    restart: always
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/etl_pipeline
+      - AIRFLOW__CORE__FERNET_KEY=BEDbEpMuS7DgP0mr-qP_GZTwwYxZCHXE0ssukGplmmA=
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=false
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      spark:
+        condition: service_started
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+    networks:
+      - etl_net
+      - shared_network
+
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow-webserver
+    command: webserver
+    restart: always
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/etl_pipeline
+      - AIRFLOW__CORE__FERNET_KEY=BEDbEpMuS7DgP0mr-qP_GZTwwYxZCHXE0ssukGplmmA=
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=false
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+    depends_on:
+      - airflow-scheduler
+      - postgres
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+    ports:
+      - "8090:8080"
+    networks:
+      - etl_net
+      - shared_network
+
+  airflow-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db init &&
+        airflow users create \
+          --username admin \
+          --password admin123 \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/etl_pipeline
+      - AIRFLOW__CORE__FERNET_KEY=BEDbEpMuS7DgP0mr-qP_GZTwwYxZCHXE0ssukGplmmA=
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - etl_net
+      - shared_network
+
+volumes:
+  postgres_data:
+
+networks:
+  etl_net:
+  shared_network:
+    external: true
+    name: shared_data_platform

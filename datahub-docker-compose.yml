@@ -1,0 +1,172 @@
+version: '3.8'
+services:
+  datahub-zookeeper:
+    image: confluentinc/cp-zookeeper:7.2.0
+    hostname: datahub-zookeeper
+    container_name: datahub-zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  datahub-kafka:
+    image: confluentinc/cp-kafka:7.2.0
+    hostname: datahub-kafka
+    container_name: datahub-kafka
+    depends_on:
+      - datahub-zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'datahub-zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://datahub-kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+
+  datahub-schema-registry:
+    image: confluentinc/cp-schema-registry:7.2.0
+    hostname: datahub-schema-registry
+    container_name: datahub-schema-registry
+    depends_on:
+      - datahub-kafka
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: datahub-schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'datahub-kafka:9092'
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+
+  datahub-elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.0
+    hostname: datahub-elasticsearch
+    container_name: datahub-elasticsearch
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+
+  datahub-mysql:
+    image: mysql:8.0
+    hostname: datahub-mysql
+    container_name: datahub-mysql
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_DATABASE: datahub
+      MYSQL_USER: datahub
+      MYSQL_PASSWORD: datahub
+      MYSQL_ROOT_PASSWORD: datahub
+    volumes:
+      - datahub-mysql-data:/var/lib/mysql
+
+  datahub-gms:
+    image: acryldata/datahub-gms:head
+    hostname: datahub-gms
+    container_name: datahub-gms
+    ports:
+      - "8080:8080"
+    depends_on:
+      - datahub-zookeeper
+      - datahub-kafka
+      - datahub-elasticsearch
+      - datahub-mysql
+      - datahub-schema-registry
+    environment:
+      - EBEAN_DATASOURCE_USERNAME=datahub
+      - EBEAN_DATASOURCE_PASSWORD=datahub
+      - EBEAN_DATASOURCE_HOST=datahub-mysql:3306
+      - EBEAN_DATASOURCE_URL=jdbc:mysql://datahub-mysql:3306/datahub?verifyServerCertificate=false&useSSL=true&useUnicode=yes&characterEncoding=UTF-8
+      - EBEAN_DATASOURCE_DRIVER=com.mysql.jdbc.Driver
+      - KAFKA_BOOTSTRAP_SERVER=datahub-kafka:9092
+      - KAFKA_SCHEMAREGISTRY_URL=http://datahub-schema-registry:8081
+      - ELASTICSEARCH_HOST=datahub-elasticsearch
+      - ELASTICSEARCH_PORT=9200
+      - DATAHUB_SERVER_TYPE=gms
+      - DATAHUB_SYSTEM_CLIENT_ID=__datahub_system
+      - DATAHUB_SYSTEM_CLIENT_SECRET=JohnSnowKnowsNothing
+      - DATAHUB_GMS_HOST=datahub-gms
+      - DATAHUB_GMS_PORT=8080
+      - DATAHUB_SECRET=YouKnowNothing
+      - DATAHUB_APP_VERSION=1.0
+      - DATAHUB_ROOT_USERNAME=admin
+      - DATAHUB_ROOT_PASSWORD=admin
+      - DATAHUB_SESSION_LIFETIME_DURATION=120d
+    networks:
+      - default
+      - shared_network
+
+  datahub-frontend:
+    image: acryldata/datahub-frontend-react:head
+    hostname: datahub-frontend
+    container_name: datahub-frontend
+    ports:
+      - "9002:9002"
+    depends_on:
+      - datahub-gms
+    environment:
+      - DATAHUB_GMS_HOST=datahub-gms
+      - DATAHUB_GMS_PORT=8080
+      - DATAHUB_SECRET=YouKnowNothing
+      - DATAHUB_APP_VERSION=1.0
+      - DATAHUB_PLAY_MEM_BUFFER_SIZE=10MB
+      - KAFKA_BOOTSTRAP_SERVER=datahub-kafka:9092
+      - ELASTICSEARCH_HOST=datahub-elasticsearch
+      - ELASTICSEARCH_PORT=9200
+      - DATAHUB_ROOT_USERNAME=admin
+      - DATAHUB_ROOT_PASSWORD=admin
+      - DATAHUB_SESSION_LIFETIME_DURATION=120d
+    networks:
+      - default
+      - shared_network
+
+  kafka-setup:
+    image: acryldata/datahub-kafka-setup:head
+    depends_on:
+      - datahub-kafka
+    environment:
+      DATAHUB_PRECREATE_TOPICS: "true"
+      KAFKA_BOOTSTRAP_SERVER: datahub-kafka:9092
+      SCHEMA_REGISTRY_URL: http://datahub-schema-registry:8081
+
+  mysql-setup:
+    image: acryldata/datahub-mysql-setup:head
+    depends_on:
+      - datahub-mysql
+    environment:
+      MYSQL_HOST: datahub-mysql
+      MYSQL_PORT: 3306
+      MYSQL_USERNAME: datahub
+      MYSQL_PASSWORD: datahub
+
+  elasticsearch-setup:
+    image: acryldata/datahub-elasticsearch-setup:head
+    depends_on:
+      - datahub-elasticsearch
+    environment:
+      ELASTICSEARCH_HOST: datahub-elasticsearch
+      ELASTICSEARCH_PORT: 9200
+
+  datahub-upgrade:
+    image: acryldata/datahub-upgrade:head
+    depends_on:
+      - datahub-gms
+    environment:
+      DATAHUB_GMS_HOST: datahub-gms
+      DATAHUB_GMS_PORT: 8080
+
+volumes:
+  datahub-mysql-data:
+
+networks:
+  default:
+  shared_network:
+    external: true
+    name: shared_data_platform 
